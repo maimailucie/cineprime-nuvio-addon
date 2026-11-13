@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: cineprime-nuvio-addon
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: TMDB_API_TOKEN
+        sync: false
+      - key: OMDB_API_KEY
+        sync: false
+      - key: MIN_IMDB_VOTES
+        value: "500"
+      - key: NGUONC_API_URL
+        value: https://phim.nguonc.com/api
