@@ -1,6 +1,6 @@
 {
   "name": "cineprime-nuvio-addon",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Curated recent movies and series for Nuvio",
   "main": "server.js",
