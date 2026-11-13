@@ -13,9 +13,9 @@ const DAY = 24 * 60 * 60 * 1000;
 
 const manifest = {
   id: 'community.cineprime.quality.catalog',
-  version: '1.2.2',
+  version: '1.3.0',
   name: '🍿 CinePrime',
-  description: 'Curated recent movies and series: Comedy, Horror, Korean picks, IMDb verified titles, promising newcomers, hidden gems, trending picks, and Vietnamese theatrical films from NguonC. No anime.',
+  description: 'Curated recent movies and series: Trending, Comedy, Horror, IMDb Verified, latest Korean titles, Vietnamese cinema, and new Netflix movies. No anime.',
   resources: ['catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt', 'nc_'],
@@ -24,20 +24,15 @@ const manifest = {
     { type: 'series', id: 'trending_series', name: '🔥 Trending Series' },
     { type: 'movie', id: 'comedy_movies_new', name: '😂 Comedy · IMDb Verified' },
     { type: 'series', id: 'comedy_series_new', name: '😂 Comedy Series · IMDb Verified' },
-    { type: 'movie', id: 'comedy_newcomers', name: '🌱 Comedy · Newcomers' },
-    { type: 'series', id: 'comedy_series_newcomers', name: '🌱 Comedy Series · Newcomers' },
     { type: 'movie', id: 'horror_movies_new', name: '👻 Horror · IMDb Verified' },
     { type: 'series', id: 'horror_series_new', name: '👻 Horror Series · IMDb Verified' },
-    { type: 'movie', id: 'horror_newcomers', name: '🌱 Horror · Newcomers' },
-    { type: 'series', id: 'horror_series_newcomers', name: '🌱 Horror Series · Newcomers' },
-    { type: 'movie', id: 'hidden_gems_movies', name: '💎 Hidden Gems · Movies' },
-    { type: 'movie', id: 'korean_movies_new', name: '🇰🇷 Korean Movies · New & Rated' },
-    { type: 'series', id: 'korean_series_new', name: '🇰🇷 Korean Series · New & Rated' },
-    { type: 'movie', id: 'vietnam_movies_nguonc', name: '🇻🇳 Điện ảnh Việt Nam · NguonC' },
+    { type: 'movie', id: 'korean_movies_new', name: '🇰🇷 Korean Movies · Latest' },
+    { type: 'series', id: 'korean_series_new', name: '🇰🇷 Korean Series · Latest' },
+    { type: 'movie', id: 'vietnam_movies', name: '🇻🇳 Vietnamese Movies · Latest' },
+    { type: 'movie', id: 'netflix_movies', name: '🎬 Netflix Movies · New' },
     { type: 'movie', id: 'search_movies', name: '🔎 Search Movies', extra: [{ name: 'search', isRequired: true }] },
     { type: 'series', id: 'search_series', name: '🔎 Search Series', extra: [{ name: 'search', isRequired: true }] }
-  ]
-};
+  ]};
 
 const builder = new addonBuilder(manifest);
 
@@ -139,11 +134,6 @@ async function getCatalog(type, id, extra = {}) {
   const hit = cacheGet(cacheKey);
   if (hit) return hit;
 
-  if (id === 'vietnam_movies_nguonc') {
-    const metas = await getNguonCVietnamMovies();
-    return cacheSet(cacheKey, metas, 30 * 60 * 1000);
-  }
-
   const isMovie = type === 'movie';
   const isComedy = id.startsWith('comedy_');
   const isHorror = id.startsWith('horror_');
@@ -151,6 +141,44 @@ async function getCatalog(type, id, extra = {}) {
   const isTrending = id.startsWith('trending_');
   const isHiddenGem = id === 'hidden_gems_movies';
   const isNewcomer = id.includes('newcomer');
+  const isVietnam = id === 'vietnam_movies';
+  const isNetflix = id === 'netflix_movies';
+  if (isKorean || isVietnam || isNetflix) {
+    const region = process.env.NETFLIX_REGION || 'US';
+    const directMovie = type === 'movie';
+    const dateField = directMovie ? 'primary_release_date' : 'first_air_date';
+    const params = new URLSearchParams({
+      language: 'en-US',
+      sort_by: `${dateField}.desc`,
+      include_adult: 'false',
+      page: '1',
+      [`${dateField}.lte`]: new Date().toISOString().slice(0, 10)
+    });
+    if (isKorean) params.set('with_origin_country', 'KR');
+    if (isVietnam) params.set('with_origin_country', 'VN');
+    if (isNetflix) {
+      params.set('with_watch_providers', '8');
+      params.set('watch_region', region);
+      params.set('with_watch_monetization_types', 'flatrate');
+    }
+    const rawPages = await Promise.all([1, 2, 3].map(async page => {
+      const pageParams = new URLSearchParams(params);
+      pageParams.set('page', String(page));
+      const result = await tmdb(`/discover/${directMovie ? 'movie' : 'tv'}?${pageParams}`);
+      return result.results || [];
+    }));
+    const candidates = rawPages.flat().filter(x => x && x.poster_path).slice(0, 50);
+    const metas = candidates.map(item => ({
+      id: String(item.id), type,
+      name: item.title || item.name || item.original_title || item.original_name || 'Untitled',
+      poster: poster(item.poster_path), background: poster(item.backdrop_path, 'w1280'),
+      description: item.overview || '',
+      releaseInfo: releaseYear(item, type === 'movie'),
+      imdbRating: Number(item.vote_average) > 0 ? Number(item.vote_average).toFixed(1) : undefined,
+      genres: (item.genre_ids || []).map(g => ({ 28:'Action',12:'Adventure',16:'Animation',35:'Comedy',80:'Crime',99:'Documentary',18:'Drama',10751:'Family',14:'Fantasy',36:'History',27:'Horror',10402:'Music',9648:'Mystery',10749:'Romance',878:'Science Fiction',10770:'TV Movie',53:'Thriller',10752:'War',37:'Western' }[g])).filter(Boolean)
+    }));
+    return cacheSet(cacheKey, metas, 3 * 60 * 60 * 1000);
+  }
   const genre = isComedy ? 35 : (isHorror ? 27 : null);
   const minRating = isComedy ? 6.5 : 6.0;
   const dateField = isMovie ? 'primary_release_date' : 'first_air_date';
@@ -190,7 +218,7 @@ async function getCatalog(type, id, extra = {}) {
 
 async function getSearchCatalog(type, term) {
   const isMovie = type === 'movie';
-  const normalized = term.toLowerCase().replace(/\s+/g, ' ').slice(0, 100);
+  const normalized = term.toLowerCase().replace(/\\s+/g, ' ').slice(0, 100);
   const cacheKey = `search:${type}:${normalized}`;
   const hit = cacheGet(cacheKey);
   if (hit) return hit;
@@ -199,10 +227,15 @@ async function getSearchCatalog(type, term) {
     const raw = await tmdb(`/search/${isMovie ? 'movie' : 'tv'}?${params}`);
     return raw.results || [];
   }));
-  const candidates = pages.flat().filter(item => item && item.poster_path).slice(0, 40);
-  const enriched = await mapLimit(candidates, 5, item => enrichCandidate(item, isMovie, true));
-  const metas = enriched.filter(Boolean).sort((a, b) => b._votes - a._votes)
-    .slice(0, 30).map(({ _votes, _date, ...meta }) => meta);
+  const metas = pages.flat().filter(item => item && item.poster_path).slice(0, 40).map(item => ({
+    id: String(item.id), type: isMovie ? 'movie' : 'series',
+    name: isMovie ? (item.title || item.original_title || 'Untitled') : (item.name || item.original_name || 'Untitled'),
+    poster: poster(item.poster_path), background: poster(item.backdrop_path, 'w1280'),
+    description: item.overview || '',
+    releaseInfo: releaseYear(item, isMovie),
+    imdbRating: Number(item.vote_average) > 0 ? Number(item.vote_average).toFixed(1) : undefined,
+    genres: []
+  }));
   return cacheSet(cacheKey, metas, 30 * 60 * 1000);
 }
 
@@ -354,17 +387,17 @@ builder.defineMetaHandler(async ({ type, id }) => {
     catch (err) { console.error('[CinePrime] NguonC meta error:', err.message); return { meta: null }; }
   }
   if (/^\d+$/.test(id) && type === 'movie') {
-    const numericKey = `meta:movie:tmdb:${id}`;
+    const numericKey = `meta:${type}:tmdb:${id}`;
     const numericHit = cacheGet(numericKey);
     if (numericHit) return { meta: numericHit };
     try {
-      const item = await tmdb(`/movie/${encodeURIComponent(id)}?language=en-US`);
-      const ext = await tmdb(`/movie/${encodeURIComponent(id)}/external_ids`);
+      const item = await tmdb(`/${type === 'movie' ? 'movie' : 'tv'}/${encodeURIComponent(id)}?language=en-US`);
+      const ext = await tmdb(`/${type === 'movie' ? 'movie' : 'tv'}/${encodeURIComponent(id)}/external_ids`);
       const imdb = ext && ext.imdb_id ? await imdbData(ext.imdb_id) : null;
       const meta = {
-        id, type: 'movie', name: item.title || item.original_title || 'Untitled',
+        id, type, name: item.title || item.name || item.original_title || item.original_name || 'Untitled',
         poster: poster(item.poster_path), background: poster(item.backdrop_path, 'w1280'),
-        description: item.overview || '', releaseInfo: releaseYear(item, true),
+        description: item.overview || '', releaseInfo: releaseYear(item, type === 'movie'),
         imdbRating: imdb ? imdb.rating.toFixed(1) : undefined,
         genres: (item.genres || []).map(g => g.name).filter(Boolean)
       };
@@ -401,7 +434,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 app.use('/', getRouter(builder.getInterface()));
-app.get('/health', (_req, res) => res.json({ ok: true, name: 'CinePrime', version: '1.2.2' }));
+app.get('/health', (_req, res) => res.json({ ok: true, name: 'CinePrime', version: '1.3.0' }));
 app.listen(PORT, () => {
   console.log(`CinePrime listening on :${PORT}`);
   if (!TMDB_TOKEN || !OMDB_KEY) console.warn('Set TMDB_API_TOKEN and OMDB_API_KEY before expecting catalog results.');
