@@ -13,7 +13,7 @@ const DAY = 24 * 60 * 60 * 1000;
 
 const manifest = {
   id: 'community.cineprime.quality.catalog',
-  version: '1.2.0',
+  version: '1.2.2',
   name: '🍿 CinePrime',
   description: 'Curated recent movies and series: Comedy, Horror, Korean picks, IMDb verified titles, promising newcomers, hidden gems, trending picks, and Vietnamese theatrical films from NguonC. No anime.',
   resources: ['catalog', 'meta'],
@@ -33,7 +33,9 @@ const manifest = {
     { type: 'movie', id: 'hidden_gems_movies', name: '💎 Hidden Gems · Movies' },
     { type: 'movie', id: 'korean_movies_new', name: '🇰🇷 Korean Movies · New & Rated' },
     { type: 'series', id: 'korean_series_new', name: '🇰🇷 Korean Series · New & Rated' },
-    { type: 'movie', id: 'vietnam_movies_nguonc', name: '🇻🇳 Điện ảnh Việt Nam · NguonC' }
+    { type: 'movie', id: 'vietnam_movies_nguonc', name: '🇻🇳 Điện ảnh Việt Nam · NguonC' },
+    { type: 'movie', id: 'search_movies', name: '🔎 Search Movies', extra: [{ name: 'search', isRequired: true }] },
+    { type: 'series', id: 'search_series', name: '🔎 Search Series', extra: [{ name: 'search', isRequired: true }] }
   ]
 };
 
@@ -94,12 +96,17 @@ function releaseYear(item, isMovie) {
   return date ? String(date).slice(0, 4) : '';
 }
 
-async function enrichCandidate(item, isMovie) {
-  const ext = await tmdb(`/${isMovie ? 'movie' : 'tv'}/${item.id}/external_ids`);
+async function enrichCandidate(item, isMovie, allowLowVotes = false) {
+  const externalKey = `external:${isMovie ? 'movie' : 'tv'}:${item.id}`;
+  let ext = cacheGet(externalKey);
+  if (!ext) {
+    ext = await tmdb(`/${isMovie ? 'movie' : 'tv'}/${item.id}/external_ids`);
+    cacheSet(externalKey, ext, 7 * DAY);
+  }
   const imdbId = ext && ext.imdb_id;
   if (!imdbId || !/^tt\d+$/.test(imdbId)) return null;
   const ratingInfo = await imdbData(imdbId);
-  if (!ratingInfo || ratingInfo.votes < MIN_VOTES) return null;
+  if (!ratingInfo || (!allowLowVotes && ratingInfo.votes < MIN_VOTES)) return null;
 
   const genres = (item.genre_ids || []).map(id => ({
     35: 'Comedy', 27: 'Horror', 53: 'Thriller', 9648: 'Mystery', 18: 'Drama'
@@ -122,7 +129,12 @@ async function enrichCandidate(item, isMovie) {
   };
 }
 
-async function getCatalog(type, id) {
+async function getCatalog(type, id, extra = {}) {
+  if (id === 'search_movies' || id === 'search_series') {
+    const term = String(extra.search || '').trim();
+    if (!term) return [];
+    return getSearchCatalog(type, term);
+  }
   const cacheKey = `catalog:${type}:${id}`;
   const hit = cacheGet(cacheKey);
   if (hit) return hit;
@@ -155,10 +167,15 @@ async function getCatalog(type, id) {
   };
   if (genre !== null) query.with_genres = String(genre);
   if (isKorean) query.with_origin_country = 'KR';
-  const params = new URLSearchParams(query);
-  const raw = await tmdb(`/discover/${isMovie ? 'movie' : 'tv'}?${params}`);
-  const candidates = (raw.results || []).slice(0, 60);
-  const enriched = await mapLimit(candidates, 5, item => enrichCandidate(item, isMovie));
+  // TMDB returns only 20 results per page by default. Fetch three pages
+  // so each catalog can draw from up to 60 candidates instead of just 20.
+  const pageResults = await Promise.all([1, 2, 3].map(async page => {
+    const pageQuery = new URLSearchParams({ ...query, page: String(page) });
+    const raw = await tmdb(`/discover/${isMovie ? 'movie' : 'tv'}?${pageQuery}`);
+    return raw.results || [];
+  }));
+  const candidates = pageResults.flat().slice(0, 60);
+  const enriched = await mapLimit(candidates, 5, item => enrichCandidate(item, isMovie, isNewcomer));
   let filtered = enriched.filter(x => x && Number(x.imdbRating) >= minRating);
   if (isNewcomer) filtered = filtered.filter(x => x._votes < MIN_VOTES);
   else if (isHiddenGem) filtered = filtered.filter(x => x._votes >= 100 && x._votes < Math.max(MIN_VOTES * 4, 2000));
@@ -167,8 +184,26 @@ async function getCatalog(type, id) {
     if (isTrending) return b._votes - a._votes;
     return b._date.localeCompare(a._date) || b._votes - a._votes;
   });
-  const metas = filtered.slice(0, 30).map(({ _votes, _date, ...meta }) => meta);
+  const metas = filtered.slice(0, 50).map(({ _votes, _date, ...meta }) => meta);
   return cacheSet(cacheKey, metas, 6 * 60 * 60 * 1000);
+}
+
+async function getSearchCatalog(type, term) {
+  const isMovie = type === 'movie';
+  const normalized = term.toLowerCase().replace(/\s+/g, ' ').slice(0, 100);
+  const cacheKey = `search:${type}:${normalized}`;
+  const hit = cacheGet(cacheKey);
+  if (hit) return hit;
+  const pages = await Promise.all([1, 2].map(async page => {
+    const params = new URLSearchParams({ query: term, include_adult: 'false', language: 'en-US', page: String(page) });
+    const raw = await tmdb(`/search/${isMovie ? 'movie' : 'tv'}?${params}`);
+    return raw.results || [];
+  }));
+  const candidates = pages.flat().filter(item => item && item.poster_path).slice(0, 40);
+  const enriched = await mapLimit(candidates, 5, item => enrichCandidate(item, isMovie, true));
+  const metas = enriched.filter(Boolean).sort((a, b) => b._votes - a._votes)
+    .slice(0, 30).map(({ _votes, _date, ...meta }) => meta);
+  return cacheSet(cacheKey, metas, 30 * 60 * 1000);
 }
 
 function nguoncImage(value) {
@@ -185,69 +220,84 @@ function categoryEntries(movie) {
   return [];
 }
 
+function categoryGroupText(source, pattern) {
+  const matches = [];
+  for (const category of categoryEntries(source)) {
+    if (!category || !category.group) continue;
+    const groupName = String(category.group.name || '');
+    if (pattern.test(groupName)) {
+      const list = Array.isArray(category.list) ? category.list : [];
+      matches.push(...list.map(x => typeof x === 'string' ? x : (x && (x.name || x.slug)) || ''));
+    }
+  }
+  return matches;
+}
+
 function isNguonCVietnamese(item, detail) {
-  const text = [];
+  const values = [];
   for (const source of [item, detail]) {
     if (!source) continue;
     for (const key of ['country', 'countries', 'origin_country', 'nationality']) {
       const value = source[key];
-      if (Array.isArray(value)) text.push(...value.map(x => typeof x === 'string' ? x : JSON.stringify(x)));
-      else if (value) text.push(typeof value === 'string' ? value : JSON.stringify(value));
+      if (Array.isArray(value)) values.push(...value.map(x => typeof x === 'string' ? x : (x && (x.name || x.slug)) || ''));
+      else if (value) values.push(typeof value === 'string' ? value : (value.name || value.slug || JSON.stringify(value)));
     }
   }
-  for (const category of categoryEntries(detail)) {
-    if (category && category.group) {
-      const groupName = String(category.group.name || '');
-      if (/quốc gia|country/i.test(groupName)) {
-        const list = category.list || [];
-        text.push(...list.map(x => typeof x === 'string' ? x : (x.name || x.slug || '')));
-      }
-    }
-  }
-  return text.some(value => /việt\s*nam|viet\s*nam|vietnam/i.test(String(value)));
+  values.push(...categoryGroupText(item, /quốc gia|country/i));
+  values.push(...categoryGroupText(detail, /quốc gia|country/i));
+  // NguonC has returned country metadata in slightly different shapes over time.
+  // Inspect only country/category metadata, not synopsis text, to avoid false matches.
+  const metadata = [item && item.category, detail && detail.category, item && item.country, detail && detail.country,
+    item && item.countries, detail && detail.countries, item && item.origin_country, detail && detail.origin_country];
+  values.push(...metadata.filter(Boolean).map(value => JSON.stringify(value)));
+  return values.some(value => /việt\s*nam|viet\s*nam|vietnam/i.test(String(value)));
 }
 
 function isNguonCMovie(item, detail) {
-  const labels = [];
+  const values = [];
   for (const source of [item, detail]) {
     if (!source) continue;
     for (const key of ['type', 'movie_type', 'format', 'category_name', 'list_name']) {
-      if (source[key]) labels.push(String(source[key]));
+      if (source[key]) values.push(String(source[key]));
     }
   }
-  for (const category of categoryEntries(detail)) {
-    if (category && category.group) {
-      const groupName = String(category.group.name || '');
-      if (/danh sách|loại phim|type/i.test(groupName)) {
-        labels.push(...(category.list || []).map(x => typeof x === 'string' ? x : (x.name || x.slug || '')));
-      }
-    }
-  }
-  // Catalog endpoint is already phim-le, but detail data is checked when it exposes a type.
-  return !labels.length || labels.some(value => /phim\s*lẻ|phim-le|movie|điện ảnh/i.test(value));
+  values.push(...categoryGroupText(item, /danh sách|loại phim|type/i));
+  values.push(...categoryGroupText(detail, /danh sách|loại phim|type/i));
+  // The candidate list is already the NguonC "phim-le" endpoint.
+  // Reject only records explicitly identified as series/TV in detail metadata.
+  return !values.some(value => /phim\s*bộ|phim-bo|series|tv\s*show/i.test(value));
 }
 
 async function getNguonCVietnamMovies() {
   const cacheKey = 'nguonc:vietnam:feature-films';
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const pages = [1, 2, 3];
+  const pages = [1, 2, 3, 4, 5];
   const [movieResponses, countryResponses] = await Promise.all([
     Promise.all(pages.map(async page => {
-      try { return await fetchJson(`${NGUONC_API}/films/danh-sach/phim-le?page=${page}`, { 'user-agent': 'CinePrime/1.2.0' }); }
+      try { return await fetchJson(`${NGUONC_API}/films/danh-sach/phim-le?page=${page}`, { 'user-agent': 'CinePrime/1.2.2' }); }
       catch (error) { console.warn('[CinePrime] NguonC movie-list error:', error.message); return null; }
     })),
     Promise.all(pages.map(async page => {
-      try { return await fetchJson(`${NGUONC_API}/films/quoc-gia/viet-nam?page=${page}`, { 'user-agent': 'CinePrime/1.2.0' }); }
+      try { return await fetchJson(`${NGUONC_API}/films/quoc-gia/viet-nam?page=${page}`, { 'user-agent': 'CinePrime/1.2.2' }); }
       catch (error) { console.warn('[CinePrime] NguonC country-list error:', error.message); return null; }
     }))
   ]);
-  const movieItems = movieResponses.flatMap(data => Array.isArray(data && data.items) ? data.items : []);
-  const countryItems = countryResponses.flatMap(data => Array.isArray(data && data.items) ? data.items : []);
+  const extractItems = data => {
+    if (Array.isArray(data && data.items)) return data.items;
+    if (Array.isArray(data && data.data && data.data.items)) return data.data.items;
+    return [];
+  };
+  const movieItems = movieResponses.flatMap(extractItems);
+  const countryItems = countryResponses.flatMap(extractItems);
   const countrySlugs = new Set(countryItems.filter(x => x && x.slug).map(x => x.slug));
-  const unique = [...new Map(movieItems.filter(x => x && x.slug && (!countrySlugs.size || countrySlugs.has(x.slug))).map(x => [x.slug, x])).values()];
-  const details = await mapLimit(unique.slice(0, 60), 5, async item => {
-    const data = await fetchJson(`${NGUONC_API}/film/${encodeURIComponent(item.slug)}`, { 'user-agent': 'CinePrime/1.2.0' });
+  // Intersect only when the country endpoint actually returned data; detail metadata
+  // remains the final Vietnam-country validation to avoid false positives.
+  const candidates = movieItems.filter(x => x && x.slug && (!countrySlugs.size || countrySlugs.has(x.slug)));
+  const unique = [...new Map(candidates.map(x => [x.slug, x])).values()];
+  console.log(`[CinePrime] NguonC lists: phim-le=${movieItems.length}, viet-nam=${countryItems.length}, candidates=${unique.length}`);
+  const details = await mapLimit(unique.slice(0, 100), 5, async item => {
+    const data = await fetchJson(`${NGUONC_API}/film/${encodeURIComponent(item.slug)}`, { 'user-agent': 'CinePrime/1.2.2' });
     const movie = data && data.movie;
     if (!movie || !isNguonCVietnamese(item, movie) || !isNguonCMovie(item, movie)) return null;
     const tmdbId = movie.tmdb && movie.tmdb.id ? String(movie.tmdb.id) : '';
@@ -255,7 +305,7 @@ async function getNguonCVietnamMovies() {
     const id = /^tt\d+$/.test(imdbId) ? imdbId : (/^\d+$/.test(tmdbId) ? tmdbId : `nc_${item.slug}`);
     const year = String(movie.year || item.year || '').match(/\d{4}/)?.[0] || '';
     const name = movie.name || item.name || item.original_name || 'Phim Việt Nam';
-    const genres = categoryEntries(movie).flatMap(category => (category && category.group && /thể loại|genre/i.test(category.group.name || '') ? (category.list || []).map(x => x.name).filter(Boolean) : []));
+    const genres = categoryGroupText(movie, /thể loại|genre/i);
     return {
       id, type: 'movie', name,
       poster: nguoncImage(item.poster_url || item.thumb_url || movie.poster_url || movie.thumb_url),
@@ -266,7 +316,8 @@ async function getNguonCVietnamMovies() {
       _slug: item.slug
     };
   });
-  const metas = details.filter(Boolean).slice(0, 40).map(({ _slug, ...meta }) => meta);
+  const metas = details.filter(Boolean).slice(0, 50).map(({ _slug, ...meta }) => meta);
+  console.log(`[CinePrime] NguonC Vietnamese feature films returned: ${metas.length}`);
   return cacheSet(cacheKey, metas, 30 * 60 * 1000);
 }
 
@@ -289,10 +340,10 @@ async function getNguonCMeta(slug) {
   };
 }
 
-builder.defineCatalogHandler(async ({ type, id }) => {
+builder.defineCatalogHandler(async ({ type, id, extra = {} }) => {
   if (!['movie', 'series'].includes(type)) return { metas: [] };
   if (!manifest.catalogs.some(c => c.type === type && c.id === id)) return { metas: [] };
-  try { return { metas: await getCatalog(type, id) }; }
+  try { return { metas: await getCatalog(type, id, extra) }; }
   catch (err) { console.error('[CinePrime] catalog error:', err.message); return { metas: [] }; }
 });
 
@@ -350,7 +401,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 app.use('/', getRouter(builder.getInterface()));
-app.get('/health', (_req, res) => res.json({ ok: true, name: 'CinePrime', version: '1.2.0' }));
+app.get('/health', (_req, res) => res.json({ ok: true, name: 'CinePrime', version: '1.2.2' }));
 app.listen(PORT, () => {
   console.log(`CinePrime listening on :${PORT}`);
   if (!TMDB_TOKEN || !OMDB_KEY) console.warn('Set TMDB_API_TOKEN and OMDB_API_KEY before expecting catalog results.');

@@ -1,4 +1,4 @@
-# CinePrime for Nuvio — v1.2.0
+# CinePrime for Nuvio — v1.2.2
 
 A Stremio-compatible catalog add-on for Nuvio. CinePrime focuses on recent, curated movies and series, with separate IMDb-verified and newcomer lists. Anime is excluded.
 
@@ -68,3 +68,19 @@ Health check: `/health`.
 - IMDb lookups: cached for 24 hours.
 - NguonC Vietnamese cinema list: cached for 30 minutes.
 - Catalog refresh makes bounded upstream requests; OMDb quotas depend on the selected API plan.
+
+
+### v1.2.2 catalog expansion
+- Fetches three TMDB discover pages (up to 60 candidates) per catalog instead of only the first page.
+- Returns up to 50 catalog items when enough eligible titles are available.
+- Caches TMDB external-ID lookups for seven days to reduce upstream requests.
+- Fixes Newcomers so titles below the configured IMDb vote threshold are not discarded before filtering.
+
+
+## v1.2.2 updates
+
+- Adds search-only Movie and Series catalogs using TMDB search; they appear in Search rather than as empty home rows.
+- Adds more defensive NguonC response parsing and country/category metadata checks for the Vietnamese feature-film catalog.
+- Logs NguonC list counts and the number of Vietnamese feature films returned, to make troubleshooting easier.
+
+Search catalogs are declared with the Stremio `search` extra parameter. Search requests are handled through `extra.search`.

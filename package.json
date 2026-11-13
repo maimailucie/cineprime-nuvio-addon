@@ -1,10 +1,19 @@
 {
   "name": "cineprime-nuvio-addon",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "private": true,
   "description": "Curated recent movies and series for Nuvio, including Vietnamese cinema from NguonC",
   "main": "server.js",
-  "scripts": {"start": "node server.js", "check": "node --check server.js"},
-  "engines": {"node": ">=20"},
-  "dependencies": {"dotenv": "^16.4.7", "express": "^4.21.2", "stremio-addon-sdk": "^1.6.10"}
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "stremio-addon-sdk": "^1.6.10"
+  }
 }
